@@ -1,0 +1,12 @@
+{
+  "name": "cabin-tc3-optimizer",
+  "version": "1.0.0",
+  "description": "Tinkers' Construct 3 tool optimizer for the CABIN modpack (MC 1.20.1) — fully static, works offline",
+  "private": true,
+  "scripts": {
+    "start": "npx serve .",
+    "serve": "npx serve .",
+    "test": "node --test tc3_optimizer.test.js"
+  },
+  "license": "MIT"
+}
