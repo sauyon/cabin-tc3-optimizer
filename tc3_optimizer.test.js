@@ -1167,3 +1167,70 @@ describe('attrLabel', () => {
     assert.strictEqual(f('minecraft:generic.oxygen_bonus'), 'Oxygen Bonus');
   });
 });
+
+describe('calcStats — slimesuit skull slot', () => {
+  const f = fn('calcStats');
+
+  before(() => {
+    ctx.MODIFIER_DEFS = {};
+    ctx.MATERIALS = {
+      iron: {
+        display: 'Iron', tier: 2,
+        skull:  { armor: 2, dur: 165 },
+        traits: [],
+      },
+      leather: {
+        display: 'Leather', tier: 0,
+        skull:  { armor: 2, dur: 150 },
+        traits: [],
+      },
+    };
+    ctx.TOOLS = {
+      slime_helmet: {
+        display: 'Slime Helmet', icon: '🪖', group: 'Armor',
+        parts: [{ label: 'Skull', statType: 'skull', scale: 1.0 }],
+        baseAtk: 0, baseAtkSpd: 1.0, baseDur: 362,
+        multiply: { atk: 1.0, dur: 1.0, mspd: 1.0 },
+        slots: { upgrades: 5, abilities: 1 },
+        builtIn: [],
+      },
+    };
+  });
+
+  it('adds skull durability on top of base durability', () => {
+    const s = f('slime_helmet', ['iron']);
+    assert.equal(s.dur, 527); // 362 base + 165 skull
+  });
+
+  it('adds skull armor', () => {
+    const s = f('slime_helmet', ['leather']);
+    assert.equal(s.armor, 2);
+    assert.equal(s.dur, 512); // 362 + 150
+  });
+
+  it('handles a missing skull material gracefully', () => {
+    const s = f('slime_helmet', ['nonexistent']);
+    assert.equal(s.dur, 362); // base only
+    assert.equal(s.armor, 0);
+  });
+});
+
+describe('materialOptions — skull', () => {
+  const f = fn('materialOptions');
+
+  before(() => {
+    ctx.MATERIALS = {
+      iron:    { display: 'Iron',    skull: { armor: 2, dur: 165 }, traits: [] },
+      glass:   { display: 'Glass',   skull: { armor: 0, dur: 90 },  traits: [] },
+      noSkull: { display: 'NoSkull', head: { dur: 100, atk: 1, mspd: 4, tier: 'minecraft:wood' }, traits: [] },
+    };
+  });
+
+  it('returns only materials with skull stats', () => {
+    const opts = f('skull');
+    const names = opts.map(([, m]) => m.display);
+    assert.equal(opts.length, 2);
+    assert.ok(names.some(n => /Iron/.test(n)));
+    assert.ok(names.some(n => /Glass/.test(n)));
+  });
+});

@@ -322,6 +322,10 @@ const TOOL_META = {
   travelers_chestplate: { icon:'🛡', iconUrl:_MC_ASSETS+'item/leather_chestplate.png',group:'Armor', notes:'Travelers chestplate; plating (scaled) + maille slots' },
   travelers_leggings:   { icon:'🦺', iconUrl:_MC_ASSETS+'item/leather_leggings.png',  group:'Armor', notes:'Travelers leggings; plating (scaled) + maille slots' },
   travelers_boots:      { icon:'👢', iconUrl:_MC_ASSETS+'item/leather_boots.png',     group:'Armor', notes:'Travelers boots; plating (scaled) + maille slots' },
+  slime_helmet:     { icon:'🪖', iconUrl:_MC_ASSETS+'item/leather_helmet.png',     group:'Armor', notes:'Slimesuit helmet; skull material slot (mob skulls) adds armor + durability; Overslime Friend trait' },
+  slime_chestplate: { icon:'🛡', iconUrl:_MC_ASSETS+'item/leather_chestplate.png', group:'Armor', notes:'Slimesuit chestplate; fixed stats; Wings trait; Overslime Friend trait' },
+  slime_leggings:   { icon:'🦺', iconUrl:_MC_ASSETS+'item/leather_leggings.png',   group:'Armor', notes:'Slimesuit leggings; fixed stats; Pockets + Shulking traits; Overslime Friend trait' },
+  slime_boots:      { icon:'👢', iconUrl:_MC_ASSETS+'item/leather_boots.png',      group:'Armor', notes:'Slimesuit boots; fixed stats; Bouncy + Leaping traits (no fall damage); Overslime Friend trait' },
 };
 
 // ─── Default optimizer goal per tool ─────────────────────────
@@ -339,6 +343,7 @@ const TOOL_DEFAULT_GOAL = {
   // Armor → defense
   plate_helmet:'defense', plate_chestplate:'defense', plate_leggings:'defense', plate_boots:'defense',
   travelers_helmet:'defense', travelers_chestplate:'defense', travelers_leggings:'defense', travelers_boots:'defense',
+  slime_helmet:'defense', slime_chestplate:'defense', slime_leggings:'defense', slime_boots:'defense',
 };
 
 // ═══════════════════════════════════════════════════════════════
@@ -429,8 +434,15 @@ function parseMaterial(name, statsJson, traitsJson, defJson, lang) {
   }
   const hasPlating = Object.keys(platings).length > 0;
 
+  // Slimeskull stats (slime helmet material slot)
+  const skullRaw = s['tconstruct:skull'];
+  const skull = skullRaw ? {
+    armor: skullRaw.armor      ?? 0,
+    dur:   skullRaw.durability ?? 0,
+  } : null;
+
   // Skip materials with no melee/mining/armor-relevant stats
-  if (!headRaw && !handleRaw && !s['tconstruct:binding'] && !hasPlating && !hasMaille && !hasCuirass) return null;
+  if (!headRaw && !handleRaw && !s['tconstruct:binding'] && !hasPlating && !hasMaille && !hasCuirass && !skull) return null;
 
   const tier      = defJson?.tier ?? inferTier(headRaw);
 
@@ -482,7 +494,7 @@ function parseMaterial(name, statsJson, traitsJson, defJson, lang) {
   const langKey = `material.tconstruct.${name}`;
   const display = (lang?.[langKey]) || toTitleCase(name.replace(/_/g, ' '));
 
-  return { display, tier, head, handle, grip, limbDur, binding, hasMaille, hasCuirass, platings, traits, perStatTraits };
+  return { display, tier, head, handle, grip, limbDur, binding, hasMaille, hasCuirass, platings, skull, traits, perStatTraits };
 }
 
 function parseTool(name, toolJson, lang) {
@@ -527,7 +539,7 @@ function parseTool(name, toolJson, lang) {
       const st    = typeof stEntry === 'string' ? stEntry : (stEntry.stat ?? '');
       const scale = typeof stEntry === 'object'  ? (stEntry.scale ?? 1.0) : 1.0;
       const localType = TC_STAT_TYPE[st] ?? 'unknown';
-      if (localType === 'unknown' || localType === 'skull') continue;
+      if (localType === 'unknown') continue;
       typeSeen[st] = (typeSeen[st] || 0) + 1;
       let label = statTypeLabel(st);
       if (typeCounts[st] > 1) label += typeSeen[st] === 1 ? ' (Primary)' : ' (Secondary)';
@@ -538,7 +550,7 @@ function parseTool(name, toolJson, lang) {
   // Fixed-stat tools (like staves) have no material parts but are still valid
   const isFixedStat = parts.length === 0 && !!baseStatsMod;
   // Only include tools with stat-contributing parts, or known fixed-stat tools
-  if (!isFixedStat && !parts.some(p => p.statType === 'head' || p.statType === 'handle' || ARMOR_PLATING_TYPES.has(p.statType))) return null;
+  if (!isFixedStat && !parts.some(p => p.statType === 'head' || p.statType === 'handle' || p.statType === 'skull' || ARMOR_PLATING_TYPES.has(p.statType))) return null;
 
   const bs   = baseStatsMod?.stats ?? {};
   const muls = multiplyMod?.multipliers ?? {};
@@ -569,6 +581,7 @@ function parseTool(name, toolJson, lang) {
     fixedStats: isFixedStat ? bs : null,
     baseAtk:    bs['tconstruct:attack_damage'] ?? 0,
     baseAtkSpd: bs['tconstruct:attack_speed']  ?? 1.0,
+    baseDur:    bs['tconstruct:durability']    ?? 0, // slimesuit: flat base + skull/plating stats on top
     multiply: {
       atk:  muls['tconstruct:attack_damage'] ?? 1,
       dur:  muls['tconstruct:durability']    ?? 1,
@@ -881,7 +894,7 @@ function calcStats(toolKey, matKeys, mods = {}) {
   }
 
   const parts = tool.parts;
-  let headDur = 0, handleDurMult = 0, atk = 0, handleDmg = 0, handleSpd = 0,
+  let headDur = tool.baseDur ?? 0, handleDurMult = 0, atk = 0, handleDmg = 0, handleSpd = 0,
       headMspd = 0, handleMspdMult = 0;
   let armorVal = 0, armorTough = 0, armorKbRes = 0; // armor piece stats
   let bestTier = 'minecraft:wood';
@@ -920,6 +933,9 @@ function calcStats(toolKey, matKeys, mods = {}) {
       handleDmg     += g.dmg     * scale;
     } else if (statType === 'limb' && mat.limbDur) {
       headDur += mat.limbDur * scale; // limb contributes flat durability only
+    } else if (statType === 'skull' && mat.skull) {
+      headDur  += mat.skull.dur   * scale; // slimesuit helmet: skull adds flat durability + armor
+      armorVal += mat.skull.armor * scale;
     } else if (ARMOR_PLATING_TYPES.has(statType) && mat.platings?.[statType]) {
       const p = mat.platings[statType];
       headDur    += p.dur   * scale;
@@ -1025,6 +1041,11 @@ function calcToolMaxStats(toolKey) {
     else if (statType === 'limb')   { totHeadDur += bLimbDur * scale; }
     else if (statType === 'handle') { totHandleDurMult += bHandleDurMult * scale; totHandleDmg += bHandleDmg * scale; totHandleSpd += bHandleSpd * scale; totHandleMspdMult += bHandleMspdMult * scale; }
     else if (statType === 'grip')   { totHandleDurMult += bGripDurMult * scale; totHandleDmg += bGripDmg * scale; }
+    else if (statType === 'skull') {
+      let bD = 0, bA = 0;
+      for (const m of allMats) { if (m.skull) { bD = Math.max(bD, m.skull.dur); bA = Math.max(bA, m.skull.armor); } }
+      totHeadDur += bD * scale; armor += bA * scale;
+    }
     else if (ARMOR_PLATING_TYPES.has(statType)) {
       let bA = 0, bT = 0, bK = 0;
       for (const m of allMats) { const p = m.platings?.[statType]; if (p) { bA = Math.max(bA, p.armor); bT = Math.max(bT, p.tough); bK = Math.max(bK, p.kbRes); } }
@@ -1032,7 +1053,7 @@ function calcToolMaxStats(toolKey) {
     }
   }
 
-  const dur    = Math.max(1, totHeadDur * (1 + totHandleDurMult) * tool.multiply.dur);
+  const dur    = Math.max(1, ((tool.baseDur ?? 0) + totHeadDur) * (1 + totHandleDurMult) * tool.multiply.dur);
   const atk    = Math.max(1, (tool.baseAtk + totHeadAtk) * (1 + Math.max(0, totHandleDmg)) * tool.multiply.atk);
   const atkSpd = Math.max(0.1, tool.baseAtkSpd * (1 + Math.max(0, totHandleSpd)));
   const mspd   = Math.max(1, totHeadMspd * (1 + totHandleMspdMult) * tool.multiply.mspd);
@@ -1086,6 +1107,7 @@ function materialOptions(statType, maxTier = 4) {
     if (ARMOR_PLATING_TYPES.has(statType)) return !!(m.platings?.[statType]);
     if (statType === 'maille')    return !!m.hasMaille;
     if (statType === 'cuirass')   return !!m.hasCuirass;
+    if (statType === 'skull')     return !!m.skull;
     return false;
   }).sort(([, a], [, b]) => b.tier - a.tier || a.display.localeCompare(b.display));
 }
