@@ -77,8 +77,8 @@ let TRAIT_EFFECTS = {}; // traitId → [{ stat, op, flat?, eachLevel? }]
 // label: short text shown inside the trait pill (alongside the name)
 // desc:  longer text shown in the custom hover tooltip
 const TRAIT_KNOWN = {
-  momentum:   { label: 'stackable MSpd',        desc: '+25% mining speed per level while mining continuously; resets when you stop' },
-  dwarven:    { label: 'MSpd underground',       desc: 'Mining speed increases the deeper underground you are' },
+  momentum:   { label: 'ramps to +25%/lvl MSpd', desc: 'Each consecutive block mined (or arrow fired) stacks a speed bonus, reaching +25% per level after ~10 actions; fades ~5s after you stop. Ranged tools get draw speed instead.' },
+  dwarven:    { label: 'MSpd 0 to +12/lvl by depth', desc: 'Bonus scales with depth: 0 at y≥64, +6 mining speed per level at y=0, up to +12 per level at y=−64 (×tool mining multiplier). High above y≈320 it instead cuts mining speed, up to −75%. Ranged tools get projectile velocity instead.' },
   magnetic:   { label: 'auto-collects drops',    desc: 'Pulls mined item drops toward the player automatically' },
   overgrowth: { label: 'self-repairs in sun',    desc: 'Slowly repairs durability when exposed to direct sunlight' },
   cultivated: { label: 'repairs from plants',    desc: 'Repairs durability when harvesting plant-based items' },
@@ -92,6 +92,149 @@ const TRAIT_KNOWN = {
   insatiable: { label: 'Fortune scales',         desc: 'Fortune level increases with each consecutive use' },
   blasting:   { label: '+MSpd near explosions',  desc: 'Gains temporary mining speed bonus after nearby explosions' },
 };
+
+// ─── Extended trait effects (display only — never fed into calcStats) ──
+// attribute modules: side effects like heavy's move-speed penalty.
+// formula modules:   conditional stat scaling (jagged, temperate…) shown as ranges.
+let TRAIT_EXTRAS = {}; // traitId → { attrs: [{attr, op, flat?, eachLevel?}], formulaMods: [rawModule] }
+
+const ATTR_LABEL = {
+  'minecraft:generic.movement_speed':       'Move speed',
+  'minecraft:generic.knockback_resistance': 'Knockback resist',
+  'minecraft:generic.attack_damage':        'Attack',
+  'minecraft:generic.attack_speed':         'Attack speed',
+  'minecraft:generic.armor':                'Armor',
+  'minecraft:generic.armor_toughness':      'Toughness',
+  'minecraft:generic.max_health':           'Max health',
+  'minecraft:generic.luck':                 'Luck',
+  'minecraft:generic.jump_strength':        'Jump',
+  'forge:entity_gravity':                   'Gravity',
+  'forge:swim_speed':                       'Swim speed',
+  'forge:step_height_addition':             'Step height',
+  'forge:block_reach':                      'Block reach',
+  'forge:entity_reach':                     'Entity reach',
+};
+function attrLabel(id) {
+  return ATTR_LABEL[id] ?? toTitleCase(String(id).replace(/^.*?:/, '').replace(/^generic\./, '').replace(/_/g, ' '));
+}
+
+// Postfix (RPN) evaluator for tconstruct conditional-stat formula modules.
+// Returns null on any unknown token so callers can skip gracefully.
+function evalPostfix(formula, vars) {
+  const st = [];
+  const bin    = f => { const b = st.pop(), a = st.pop(); st.push(f(a, b)); };
+  const binRev = f => { const b = st.pop(), a = st.pop(); st.push(f(b, a)); };
+  const unary  = f => { st.push(f(st.pop())); };
+  for (const tok of formula) {
+    if (typeof tok === 'number') { st.push(tok); continue; }
+    if (typeof tok !== 'string') return null;
+    if (tok.startsWith('$')) {
+      const v = vars[tok.slice(1)];
+      if (v == null) return null;
+      st.push(v); continue;
+    }
+    switch (tok) {
+      case '+': bin((a, b) => a + b); break;
+      case '-': bin((a, b) => a - b); break;
+      case '*': bin((a, b) => a * b); break;
+      case '/': bin((a, b) => a / b); break;
+      case '!-': binRev((a, b) => a - b); break;
+      case '!/': binRev((a, b) => a / b); break;
+      case '^':  bin((a, b) => Math.pow(a, b)); break;
+      case 'min': bin(Math.min); break;
+      case 'max': bin(Math.max); break;
+      case '>=': bin((a, b) => (a >= b ? 1 : 0)); break;
+      case 'abs':  unary(Math.abs); break;
+      case 'sqrt': unary(Math.sqrt); break;
+      case 'non-negative':  unary(x => Math.max(0, x)); break;
+      case 'percent_clamp': unary(x => Math.min(1, Math.max(0, x))); break;
+      case 'duplicate': st.push(st[st.length - 1]); break;
+      case 'swap': { const b = st.pop(), a = st.pop(); st.push(b, a); break; }
+      default: return null;
+    }
+    if (st.some(v => typeof v !== 'number' || Number.isNaN(v))) return null;
+  }
+  return st.length ? st[st.length - 1] : null;
+}
+
+// Value domains for conditional formula variables — the min/max corners that
+// get sampled to produce an effect range. null = can't bound it (skip range).
+function varDomain(def) {
+  const type = typeof def === 'string' ? def : def?.type;
+  switch (type) {
+    case 'tconstruct:tool_lost_durability': return [0, 100];
+    case 'tconstruct:tool_durability':      return [0, 100];
+    case 'tconstruct:stat_multiplier':      return [100, 100]; // max-durability baseline
+    case 'tconstruct:tool_stat':            return [100, 100];
+    case 'tconstruct:biome_temperature':    return [-0.5, 2];
+    case 'tconstruct:block_light':          return [0, 15];
+    case 'tconstruct:entity':
+      return def.entity_type === 'tconstruct:health' ? [0, 20] : null;
+    default: return null;
+  }
+}
+
+// The two tool-stat formula module types we surface, and their context vars.
+const FORMULA_MODULES = {
+  'tconstruct:conditional_melee_damage': { base: 'damage', stat: 'atk'  },
+  'tconstruct:conditional_mining_speed': { base: 'speed',  stat: 'mspd' },
+};
+
+// Compute [min, max] of a conditional formula module at a given trait level by
+// sampling every variable-domain corner. percent modules yield a multiplier on
+// the base stat; the rest yield a flat bonus.
+function formulaRange(m, level) {
+  const cfg = FORMULA_MODULES[m.type];
+  if (!cfg || !Array.isArray(m.formula)) return null;
+  const domains = {};
+  for (const [name, def] of Object.entries(m.variables ?? {})) {
+    const d = varDomain(def);
+    if (!d) return null;
+    domains[name] = d;
+  }
+  domains.level      = [level, level];
+  domains.multiplier = [1, 1];
+  domains[cfg.base]  = m.percent ? [1, 1] : [0, 0];
+  const names = Object.keys(domains);
+  let min = Infinity, max = -Infinity, failed = false;
+  const walk = (i, vars) => {
+    if (i === names.length) {
+      const v = evalPostfix(m.formula, vars);
+      if (v == null) { failed = true; return; }
+      if (v < min) min = v;
+      if (v > max) max = v;
+      return;
+    }
+    const n = names[i];
+    for (const x of domains[n]) { vars[n] = x; walk(i + 1, vars); if (failed) return; }
+  };
+  walk(0, {});
+  if (failed || min > max) return null;
+  return { stat: cfg.stat, min, max, percent: !!m.percent };
+}
+
+// Extract display-only extras from a modifier definition JSON.
+// Formula modules are kept raw and only retained if their range is computable.
+function parseTraitExtras(modJson) {
+  const attrs = [], formulaMods = [];
+  for (const m of (modJson?.modules ?? [])) {
+    if (m.type === 'tconstruct:attribute' && m.attribute) {
+      const eff = { attr: attrLabel(m.attribute), op: m.operation ?? 'addition' };
+      if (m.flat       != null) eff.flat      = m.flat;
+      if (m.each_level != null) eff.eachLevel = m.each_level;
+      attrs.push(eff);
+    } else if (FORMULA_MODULES[m.type] && Array.isArray(m.formula) && formulaRange(m, 1)) {
+      formulaMods.push(m);
+    }
+  }
+  return { attrs, formulaMods };
+}
+const _rangeCache = new Map();
+function cachedRange(traitId, idx, m, level) {
+  const key = `${traitId}:${idx}:${level}`;
+  if (!_rangeCache.has(key)) _rangeCache.set(key, formulaRange(m, level));
+  return _rangeCache.get(key);
+}
 
 // ─── Mod integration groups ───────────────────────────────────
 // Materials gated behind a `condition` in their def JSON — only present if
@@ -604,6 +747,7 @@ async function init() {
         .map(n => fetchRaw(TC + 'modifiers/' + n + '.json').then(d => [n, d]))
     );
     TRAIT_EFFECTS = {};
+    TRAIT_EXTRAS = {};
     for (const [name, modJson] of traitDefArr) {
       if (!modJson) continue;
       const effects = [];
@@ -619,6 +763,8 @@ async function init() {
         effects.push(eff);
       }
       if (effects.length) TRAIT_EFFECTS[name] = effects;
+      const extras = parseTraitExtras(modJson);
+      if (extras.attrs.length || extras.formulaMods.length) TRAIT_EXTRAS[name] = extras;
     }
 
     MODIFIER_DEFS = {};
@@ -644,6 +790,8 @@ async function init() {
         }
       }
       MODIFIER_DEFS[name] = { display, slot: info.slot, maxLevel: info.maxLevel, desc, effects };
+      const extras = parseTraitExtras(modJson);
+      if (extras.attrs.length || extras.formulaMods.length) TRAIT_EXTRAS[name] = extras;
     }
 
     setProgress(100, `Loaded ${Object.keys(MATERIALS).length} materials · ${Object.keys(TOOLS).length} tools · ${Object.keys(MODIFIER_DEFS).length} modifiers`, '');
@@ -1242,10 +1390,9 @@ function stackedTraitName(traitName, stackedLevel) {
 
 function traitValueStr(traitId, level) {
   const effs = TRAIT_EFFECTS[traitId];
-  if (!effs || !effs.length) return TRAIT_KNOWN[traitId]?.label ?? '';
   const STAT_LBL = { dur: 'Dur', atk: 'Atk', mspd: 'MSpd', atkSpd: 'AtkSpd' };
   const parts = [];
-  for (const e of effs) {
+  for (const e of (effs ?? [])) {
     if (e.minLevel != null && level < e.minLevel) continue;
     if (e.maxLevel != null && level > e.maxLevel) continue;
     const val = (e.flat ?? 0) + (e.eachLevel ?? 0) * level;
@@ -1257,6 +1404,30 @@ function traitValueStr(traitId, level) {
       parts.push(`${val >= 0 ? '+' : ''}${pct}% ${lbl}`);
     }
   }
+  // display-only extras: attribute side effects + conditional formula ranges
+  const extras = TRAIT_EXTRAS[traitId];
+  for (const a of (extras?.attrs ?? [])) {
+    const val = (a.flat ?? 0) + (a.eachLevel ?? 0) * level;
+    if (!val) continue;
+    if (a.op === 'addition' || a.op === 'add') {
+      parts.push(`${val >= 0 ? '+' : ''}${+val.toFixed(2)} ${a.attr}`);
+    } else {
+      parts.push(`${val >= 0 ? '+' : ''}${+(val * 100).toFixed(1)}% ${a.attr}`);
+    }
+  }
+  (extras?.formulaMods ?? []).forEach((m, i) => {
+    const r = cachedRange(traitId, i, m, level);
+    if (!r) return;
+    const lbl = STAT_LBL[r.stat] ?? r.stat;
+    if (r.percent) {
+      const dec = (r.max - r.min) < 0.01 ? 3 : 2; // keep tiny ranges (jagged) visible
+      parts.push(`${lbl} ×${+r.min.toFixed(dec)}–${+r.max.toFixed(dec)}`);
+    } else {
+      const f = v => `${v >= 0 ? '+' : ''}${+v.toFixed(1)}`;
+      parts.push(`${f(r.min)}–${f(r.max)} ${lbl}`);
+    }
+  });
+  if (!parts.length) return TRAIT_KNOWN[traitId]?.label ?? '';
   return parts.join(', ');
 }
 

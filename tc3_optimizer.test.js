@@ -995,3 +995,175 @@ describe('tierBadgeHTML', () => {
     // should not throw
   });
 });
+
+// ──────────────────────────────────────────────────────────────
+
+describe('evalPostfix', () => {
+  const f = fn('evalPostfix');
+
+  it('evaluates basic arithmetic', () => {
+    assert.strictEqual(f([3, 4, '+'], {}), 7);
+    assert.strictEqual(f([10, 4, '-'], {}), 6);
+    assert.strictEqual(f([3, 4, '*'], {}), 12);
+    assert.strictEqual(f([10, 4, '/'], {}), 2.5);
+  });
+
+  it('handles reversed operators !- and !/', () => {
+    assert.strictEqual(f([10, 4, '!-'], {}), -6); // 4 - 10
+    assert.strictEqual(f([10, 2, '!/'], {}), 0.2); // 2 / 10
+  });
+
+  it('resolves $variables', () => {
+    assert.strictEqual(f(['$x', 2, '*'], { x: 5 }), 10);
+  });
+
+  it('supports sqrt, ^, abs, min, max, >=', () => {
+    assert.strictEqual(f([9, 'sqrt'], {}), 3);
+    assert.strictEqual(f([2, 3, '^'], {}), 8);
+    assert.strictEqual(f([-4, 'abs'], {}), 4);
+    assert.strictEqual(f([2, 7, 'min'], {}), 2);
+    assert.strictEqual(f([2, 7, 'max'], {}), 7);
+    assert.strictEqual(f([5, 5, '>='], {}), 1);
+    assert.strictEqual(f([4, 5, '>='], {}), 0);
+  });
+
+  it('supports duplicate, swap, non-negative, percent_clamp', () => {
+    assert.strictEqual(f([3, 'duplicate', '*'], {}), 9);
+    assert.strictEqual(f([1, 2, 'swap', '-'], {}), 1); // 2 - 1 after swap
+    assert.strictEqual(f([-5, 'non-negative'], {}), 0);
+    assert.strictEqual(f([1.5, 'percent_clamp'], {}), 1);
+    assert.strictEqual(f([-0.5, 'percent_clamp'], {}), 0);
+  });
+
+  it('returns null on unknown tokens or missing variables', () => {
+    assert.strictEqual(f([1, 2, 'frobnicate'], {}), null);
+    assert.strictEqual(f(['$missing', 1, '+'], {}), null);
+  });
+
+  it('evaluates the real jagged formula', () => {
+    // sqrt(lost/max) * level * 0.005 + 1.0, times damage (percent module)
+    const jagged = ['$lost', '$max', '/', 'sqrt', '$level', '*', 0.005, '*', 1.0, '+', '$damage', '*'];
+    assert.strictEqual(f(jagged, { lost: 0, max: 100, level: 1, damage: 1 }), 1);
+    assert.ok(Math.abs(f(jagged, { lost: 100, max: 100, level: 2, damage: 1 }) - 1.01) < 1e-9);
+  });
+});
+
+describe('varDomain', () => {
+  const f = fn('varDomain');
+  // note: results come from the VM realm — compare via JSON, not deepStrictEqual
+  const j = (v) => JSON.stringify(v);
+
+  it('bounds durability variables', () => {
+    assert.strictEqual(j(f('tconstruct:tool_lost_durability')), '[0,100]');
+    assert.strictEqual(j(f({ type: 'tconstruct:stat_multiplier' })), '[100,100]');
+  });
+
+  it('bounds light and temperature', () => {
+    assert.strictEqual(j(f({ type: 'tconstruct:block_light' })), '[0,15]');
+    assert.strictEqual(j(f({ type: 'tconstruct:biome_temperature' })), '[-0.5,2]');
+  });
+
+  it('bounds entity health, rejects unknown entity types', () => {
+    assert.strictEqual(j(f({ type: 'tconstruct:entity', entity_type: 'tconstruct:health' })), '[0,20]');
+    assert.strictEqual(f({ type: 'tconstruct:entity', entity_type: 'tconstruct:oxygen' }), null);
+    assert.strictEqual(f({ type: 'tconstruct:persistent_data' }), null);
+  });
+});
+
+describe('formulaRange', () => {
+  const f = fn('formulaRange');
+
+  it('computes jagged attack multiplier range', () => {
+    const m = {
+      type: 'tconstruct:conditional_melee_damage',
+      formula: ['$lost', '$max', '/', 'sqrt', '$level', '*', 0.005, '*', 1.0, '+', '$damage', '*'],
+      percent: true,
+      variables: {
+        lost: 'tconstruct:tool_lost_durability',
+        max: { type: 'tconstruct:stat_multiplier', stat: 'tconstruct:durability' },
+      },
+    };
+    const r = f(m, 1);
+    assert.strictEqual(r.stat, 'atk');
+    assert.ok(r.percent);
+    assert.strictEqual(r.min, 1);          // full durability: no bonus
+    assert.ok(Math.abs(r.max - 1.005) < 1e-9); // fully worn: +0.5% at level 1
+  });
+
+  it('computes temperate flat mining speed range', () => {
+    const m = {
+      type: 'tconstruct:conditional_mining_speed',
+      formula: ['$temperature', 0.75, '!-', 'non-negative', '$level', '*', 6.0, '*', '$multiplier', '*', '$speed', '+'],
+      percent: false,
+      variables: { temperature: { type: 'tconstruct:biome_temperature', fallback: -0.5 } },
+    };
+    const r = f(m, 1);
+    assert.strictEqual(r.stat, 'mspd');
+    assert.strictEqual(r.min, 0);                    // hot biome: no bonus
+    assert.ok(Math.abs(r.max - 7.5) < 1e-6);         // coldest biome: (0.75+0.5)*6
+  });
+
+  it('returns null for unbounded variables or unsupported module types', () => {
+    assert.strictEqual(f({
+      type: 'tconstruct:conditional_melee_damage', formula: ['$bounces', '$damage', '+'],
+      variables: { bounces: { type: 'tconstruct:persistent_data' } },
+    }, 1), null);
+    assert.strictEqual(f({ type: 'tconstruct:protection', formula: [1] }, 1), null);
+  });
+});
+
+describe('parseTraitExtras', () => {
+  const f = fn('parseTraitExtras');
+
+  it('extracts attribute side effects (heavy)', () => {
+    const heavy = {
+      modules: [
+        { type: 'tconstruct:stat_boost', each_level: 0.15, operation: 'multiply_base', stat: 'tconstruct:mining_speed' },
+        { type: 'tconstruct:attribute', attribute: 'minecraft:generic.movement_speed', each_level: -0.1, operation: 'multiply_base' },
+        { type: 'tconstruct:attribute', attribute: 'forge:entity_gravity', each_level: 0.05, operation: 'multiply_total' },
+      ],
+    };
+    const ex = f(heavy);
+    assert.strictEqual(ex.attrs.length, 2);
+    assert.strictEqual(ex.attrs[0].attr, 'Move speed');
+    assert.strictEqual(ex.attrs[0].eachLevel, -0.1);
+    assert.strictEqual(ex.attrs[1].attr, 'Gravity');
+    assert.strictEqual(ex.formulaMods.length, 0);
+  });
+
+  it('keeps computable formula modules, drops uncomputable ones', () => {
+    const json = {
+      modules: [
+        { type: 'tconstruct:conditional_melee_damage', percent: true,
+          formula: ['$lost', '$max', '/', 'sqrt', '$level', '*', 0.005, '*', 1.0, '+', '$damage', '*'],
+          variables: { lost: 'tconstruct:tool_lost_durability', max: { type: 'tconstruct:stat_multiplier' } } },
+        { type: 'tconstruct:conditional_melee_damage', percent: true,
+          formula: ['$mystery', '$damage', '+'],
+          variables: { mystery: { type: 'tconstruct:persistent_data' } } },
+      ],
+    };
+    const ex = f(json);
+    assert.strictEqual(ex.formulaMods.length, 1);
+  });
+
+  it('handles missing/empty modules', () => {
+    for (const input of [null, {}]) {
+      const ex = f(input);
+      assert.strictEqual(ex.attrs.length, 0);
+      assert.strictEqual(ex.formulaMods.length, 0);
+    }
+  });
+});
+
+describe('attrLabel', () => {
+  const f = fn('attrLabel');
+
+  it('maps known attributes', () => {
+    assert.strictEqual(f('minecraft:generic.movement_speed'), 'Move speed');
+    assert.strictEqual(f('forge:entity_gravity'), 'Gravity');
+  });
+
+  it('prettifies unknown attributes', () => {
+    assert.strictEqual(f('minecraft:generic.oxygen_bonus'), 'Oxygen Bonus');
+  });
+});
