@@ -1702,14 +1702,19 @@ function slotStatMaxes(sorted, statType) {
     } else if (statType === 'limb' && m.limbDur) {
       mx.dur = Math.max(mx.dur || 0, m.limbDur);
     } else if (statType === 'handle' && m.handle) {
-      mx.durMult  = Math.max(mx.durMult  || 0, Math.abs(m.handle.durMult));
-      mx.dmg      = Math.max(mx.dmg      || 0, Math.abs(m.handle.dmg));
-      mx.spd      = Math.max(mx.spd      || 0, Math.abs(m.handle.spd));
-      mx.mspdMult = Math.max(mx.mspdMult || 0, Math.abs(m.handle.mspdMult));
+      // signed stats: track positive and negative maxima separately so
+      // penalties (e.g. -30% durability) don't scale against bonuses
+      const h = m.handle;
+      for (const [k, v] of [['durMult', h.durMult], ['dmg', h.dmg], ['spd', h.spd], ['mspdMult', h.mspdMult]]) {
+        if (v >= 0) mx[k]         = Math.max(mx[k]         || 0, v);
+        else        mx[k + 'Neg'] = Math.max(mx[k + 'Neg'] || 0, -v);
+      }
     } else if (statType === 'grip' && (m.grip || m.handle)) {
       const g = m.grip ?? m.handle;
-      mx.durMult = Math.max(mx.durMult || 0, Math.abs(g.durMult));
-      mx.dmg     = Math.max(mx.dmg     || 0, Math.abs(g.dmg));
+      for (const [k, v] of [['durMult', g.durMult], ['dmg', g.dmg]]) {
+        if (v >= 0) mx[k]         = Math.max(mx[k]         || 0, v);
+        else        mx[k + 'Neg'] = Math.max(mx[k + 'Neg'] || 0, -v);
+      }
     } else if (ARMOR_PLATING_TYPES.has(statType) && m.platings?.[statType]) {
       const p = m.platings[statType];
       mx.armor = Math.max(mx.armor || 0, p.armor);
@@ -1735,6 +1740,20 @@ function slotStatBars(mat, statType, maxes) {
     </div>`;
   };
   const pct = v => `${v >= 0 ? '+' : ''}${(v * 100).toFixed(0)}%`;
+  // Diverging bar for signed multiplier stats: zero baseline at the center,
+  // bonuses fill right (accent), penalties fill left (red).
+  const sbar = (key, val, posMax, negMax, fmt) => {
+    if (!posMax && !negMax) return '';
+    const half = (v, m) => (m > 0 ? (Math.min(1, v / m) * 50).toFixed(1) : '0.0');
+    const fill = val < 0
+      ? `<div class="ssb-fill ssb-neg" style="left:auto;right:50%;width:${half(-val, negMax)}%"></div>`
+      : `<div class="ssb-fill" style="left:50%;width:${half(val, posMax)}%"></div>`;
+    return `<div class="slot-stat-bar">
+      <span class="ssb-key">${key}</span>
+      <div class="ssb-track ssb-div">${fill}</div>
+      <span class="ssb-val">${fmt(val)}</span>
+    </div>`;
+  };
   const parts = [];
   if ((statType === 'head' || statType === 'limb') && mat.head) {
     parts.push(bar('dur',  mat.head.dur,  maxes.dur  || 1, null));
@@ -1743,14 +1762,14 @@ function slotStatBars(mat, statType, maxes) {
   } else if (statType === 'limb' && mat.limbDur) {
     parts.push(bar('dur', mat.limbDur, maxes.dur || 1, null));
   } else if (statType === 'handle' && mat.handle) {
-    parts.push(bar('dur×',  mat.handle.durMult,  maxes.durMult  || 1, pct));
-    if (maxes.dmg)      parts.push(bar('atk+',  mat.handle.dmg,      maxes.dmg      || 1, pct));
-    if (maxes.spd)      parts.push(bar('spd+',  mat.handle.spd,      maxes.spd      || 1, pct));
-    if (maxes.mspdMult) parts.push(bar('mspd×', mat.handle.mspdMult, maxes.mspdMult || 1, pct));
+    parts.push(sbar('dur×',  mat.handle.durMult,  maxes.durMult  || 0, maxes.durMultNeg  || 0, pct));
+    if (maxes.dmg || maxes.dmgNeg)           parts.push(sbar('atk+',  mat.handle.dmg,      maxes.dmg      || 0, maxes.dmgNeg      || 0, pct));
+    if (maxes.spd || maxes.spdNeg)           parts.push(sbar('spd+',  mat.handle.spd,      maxes.spd      || 0, maxes.spdNeg      || 0, pct));
+    if (maxes.mspdMult || maxes.mspdMultNeg) parts.push(sbar('mspd×', mat.handle.mspdMult, maxes.mspdMult || 0, maxes.mspdMultNeg || 0, pct));
   } else if (statType === 'grip' && (mat.grip || mat.handle)) {
     const g = mat.grip ?? mat.handle;
-    parts.push(bar('dur×', g.durMult, maxes.durMult || 1, pct));
-    if (maxes.dmg) parts.push(bar('atk+', g.dmg, maxes.dmg || 1, pct));
+    parts.push(sbar('dur×', g.durMult, maxes.durMult || 0, maxes.durMultNeg || 0, pct));
+    if (maxes.dmg || maxes.dmgNeg) parts.push(sbar('atk+', g.dmg, maxes.dmg || 0, maxes.dmgNeg || 0, pct));
   } else if (ARMOR_PLATING_TYPES.has(statType) && mat.platings?.[statType]) {
     const p = mat.platings[statType];
     parts.push(bar('armor', p.armor, maxes.armor || 1, null));

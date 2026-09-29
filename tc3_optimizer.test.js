@@ -1234,3 +1234,40 @@ describe('materialOptions — skull', () => {
     assert.ok(names.some(n => /Glass/.test(n)));
   });
 });
+
+describe('slot stat bars — signed multiplier stats', () => {
+  const maxesF = fn('slotStatMaxes');
+  const barsF  = fn('slotStatBars');
+
+  const mats = [
+    ['good', { display: 'Good', handle: { durMult: 0.6, dmg: 0.2, spd: 0, mspdMult: 0 }, traits: [] }],
+    ['bad',  { display: 'Bad',  handle: { durMult: -0.3, dmg: -0.1, spd: 0, mspdMult: 0 }, traits: [] }],
+  ];
+
+  it('tracks positive and negative maxima separately', () => {
+    const mx = maxesF(mats, 'handle');
+    assert.equal(mx.durMult, 0.6);
+    assert.equal(mx.durMultNeg, 0.3);
+    assert.equal(mx.dmg, 0.2);
+    assert.equal(mx.dmgNeg, 0.1);
+  });
+
+  it('renders a negative durability multiplier as a left-side red bar, not full width', () => {
+    const mx = maxesF(mats, 'handle');
+    const bad = mats[1][1];
+    const html = barsF(bad, 'handle', mx);
+    assert.ok(html.includes('ssb-neg'), 'negative stat gets the neg class');
+    assert.ok(html.includes('right:50%'), 'negative bar anchors left of center');
+    // -0.3 against negMax 0.3 => 50% of the track (half track), never 100%
+    assert.ok(!html.includes('width:100.0%'), 'no full-width bar for a penalty');
+  });
+
+  it('renders a positive multiplier right of center scaled to the positive max', () => {
+    const mx = maxesF(mats, 'handle');
+    const good = mats[0][1];
+    const html = barsF(good, 'handle', mx);
+    assert.ok(!html.includes('ssb-neg'), 'positive stat has no neg class');
+    assert.ok(html.includes('left:50%'), 'positive bar anchors at center');
+    assert.ok(html.includes('width:50.0%'), 'max positive fills its half of the track');
+  });
+});
